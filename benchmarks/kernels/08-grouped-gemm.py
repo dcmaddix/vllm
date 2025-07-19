@@ -113,24 +113,32 @@ def grouped_matmul_kernel(
 ):
     tile_idx = tl.program_id(0)
     last_problem_end = 0
+    gm, gn, gk = group_gemm_sizes
+    lda, ldb, ldc = g_lds
+    # lda = tl.load(g_lds)
+    num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
+    num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
+    num_tiles = num_m_tiles * num_n_tiles
+    # ldb = tl.load(g_lds + 1)
+    # ldc = tl.load(g_lds  + 2)
     for g in range(group_size):
         # get the gemm size of the current problem
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
-        num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
-        num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
-        num_tiles = num_m_tiles * num_n_tiles
+        # tl.device_print("group_gemm_sizes", group_gemm_sizes)
+        #tl.device_print("gm", gm)
+        #tl.device_print("group_size", group_size)
+        #tl.device_print("gn", gn)
+        # tl.device_print("gk", gk)
+        # print("num_m_tiles", num_m_tiles)
+        # print("num_n_tiles", num_n_tiles)
+        # print("num_tiles", num_tiles)
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             # pick up a tile from the current gemm problem
             k = gk
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
             c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            # tl.device_print("a_ptr", a_ptr)
             # figure out tile coordinates
             tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
@@ -145,13 +153,17 @@ def grouped_matmul_kernel(
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
                 # hint to Triton compiler to do proper loop pipelining
-               #tl.multiple_of(a_ptrs, [16, 16])
-                #tl.multiple_of(b_ptrs, [16, 16])
+                tl.multiple_of(a_ptrs, [16, 16])
+                tl.multiple_of(b_ptrs, [16, 16])
                 # assume full tile for now
-                a = tl.load(a_ptrs)
+                a = tl.load(a_ptrs) # FIXME there is an error with the load function
+                #a = tl.full((BLOCK_SIZE_M, BLOCK_SIZE_K), value=1, dtype=tl.float16)
+                #tl.full((BLOCK_WIDTH, K_DIM), value=1, dtype=tl.float32)
                 b = tl.load(b_ptrs)
+                #b = tl.full((BLOCK_SIZE_K, BLOCK_SIZE_N), value=1, dtype=tl.float16)
                 accumulator += tl.dot(a, b)
-                a_ptrs += BLOCK_SIZE_K
+                # tl.device_print("a", a)
+                a_ptrs += BLOCK_SIZE_K  # no lda here
                 b_ptrs += BLOCK_SIZE_K * ldb
             c = accumulator.to(tl.float16)
 
@@ -160,7 +172,8 @@ def grouped_matmul_kernel(
             c_ptrs = c_ptr  + ldc * offs_cm[:, None] + offs_cn[None, :]
 
             # assumes full tile for now
-            tl.store(c_ptrs, c)
+            #tl.store(c_ptrs, tl.full((BLOCK_SIZE_M, BLOCK_SIZE_N), value=1, dtype=tl.float16))
+            tl.store(c_ptrs, c) # invalid read 16 bytes
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
@@ -175,8 +188,9 @@ def get_config():
         with open(config_file_path) as f:
             return {int(key): val for key, val in json.load(f).items()}
 
+
 configs = get_config()
-def group_gemm_fn(group_A, group_B):
+def group_gemm_fn(group_A, group_B, use_config=False):
     assert len(group_A) == len(group_B)
     group_size = len(group_A)
 
@@ -200,6 +214,7 @@ def group_gemm_fn(group_A, group_B):
         g_sizes += [M, N, K]
         g_lds += [A.stride(0), B.stride(0), C.stride(0)]
 
+    # print(A_addrs, B_addrs, C_addrs)
     # note these are device tensors
     d_a_ptrs = torch.tensor(A_addrs, device=DEVICE)
     d_b_ptrs = torch.tensor(B_addrs, device=DEVICE)
@@ -208,60 +223,168 @@ def group_gemm_fn(group_A, group_B):
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
     # we use a fixed number of CTA, and it's auto-tunable
     config = configs[M]
-    config['NUM_SM']= num_sms()
+    config['NUM_SM']= num_sms() 
     config.pop('GROUP_SIZE_M', None)
-    print(M, config)
+    # print(config)
     grid = lambda META: (META['NUM_SM'], )
-    grouped_matmul_kernel[grid](
+    if use_config:
+        grouped_matmul_kernel[grid](
+        d_a_ptrs,
+        d_b_ptrs,
+        d_c_ptrs,
+        (M, N, K),
+        (K, N, N),
+        group_size,
+        **config,
+        )
+    else:
+        grouped_matmul_kernel[grid](
         d_a_ptrs,
         d_b_ptrs,
         d_c_ptrs,
         d_g_sizes,
         d_g_lds,
-        group_size,
-        **config,
+        group_size
     )
     return group_C
 
-# run simple test case all square same dimension 4 groups of GEMMs
-group_m = [1]
-group_n = [2048]
-group_k = [5192]
-group_A = []
-group_B = []
-group_B_T = []
-assert len(group_m) == len(group_n)
-assert len(group_n) == len(group_k)
-group_size = len(group_m)
-for i in range(group_size):
-    M = group_m[i]
-    N = group_n[i]
-    K = group_k[i]
-    A = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
-    B = torch.rand((K, N), device=DEVICE, dtype=torch.float16)
-    B_T = B.T.contiguous()
-    group_A.append(A)
-    group_B.append(B)
-    group_B_T.append(B_T)
-
-tri_out = group_gemm_fn(group_A, group_B)
-ref_out = [torch.matmul(a, b) for a, b in zip(group_A, group_B)]
-for i in range(group_size):
-    assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
-print(tri_out, ref_out)
-
-
 # only launch the kernel, no tensor preparation here to remove all overhead
-def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size):
-    grid = lambda META: (META['NUM_SM'], )
+def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size, config):
+    grid = lambda META: (META['NUM_SM'],)
     grouped_matmul_kernel[grid](
         a_ptrs,
-        b_ptrs,#
+        b_ptrs,
         c_ptrs,
         sizes,
         lds,
         group_size,
+        **config,
     )
+
+def test_moe_perf(M=1, N=2048, K=5192, num_experts=128, use_fp8=False, dtype_fp8 = torch.float8_e4m3fn):
+    group_A = []
+    group_B = []
+    A_addrs = []
+    B_addrs = []
+    C_addrs = []
+    group_C = []
+    num_activated_experts = min(num_experts, M)
+    print(M, num_activated_experts)
+    A_total = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
+    B_total = torch.rand((num_experts, K, N), device=DEVICE, dtype=torch.float16)
+    config = configs[M]
+    config['NUM_SM']= num_sms() 
+    config.pop('GROUP_SIZE_M', None)
+    expert_ids = torch.arange(num_activated_experts, device=DEVICE, dtype=torch.int32) #.view(-1,1)
+    for m in range(num_activated_experts):
+        A = torch.unsqueeze(A_total[m,:], 0)
+        M_e = A.shape[0]
+        B = B_total[expert_ids[m], :, :]
+        if use_fp8:
+            A = A.to(dtype_fp8)
+            # b = b.T
+            B = B.to(dtype_fp8)
+        C = torch.empty((M_e, N), device=DEVICE, dtype=torch.float16)
+        print(A.stride(0), B.stride(0), C.stride(0), K, N, N)
+
+        group_A.append(A)
+        group_B.append(B)
+        group_C.append(C)
+        A_addrs.append(A.data_ptr())
+        B_addrs.append(B.data_ptr())
+        C_addrs.append(C.data_ptr())
+        # g_sizes += [M_e, N, K]
+        # g_lds += [A.stride(0), B.stride(0), C.stride(0)]
+        # g_T_lds += [A.stride(0), B_T.stride(0), C.stride(0)]
+
+    d_a_ptrs = torch.tensor(A_addrs, device=DEVICE)
+    d_b_ptrs = torch.tensor(B_addrs, device=DEVICE)
+    #d_b_t_ptrs = torch.tensor(B_T_addrs, device=DEVICE)
+    d_c_ptrs = torch.tensor(C_addrs, device=DEVICE)
+    # d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
+    # d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
+    # d_g_t_lds = torch.tensor(g_T_lds, dtype=torch.int32, device=DEVICE)
+
+    quantiles = [0.5, 0.2, 0.8]
+    ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: triton_perf_fn(d_a_ptrs, d_b_ptrs, d_c_ptrs,(1, N, K),
+                                    (K, N, N), num_activated_experts, config), quantiles=quantiles)
+    #ref_out = [torch.matmul(a, b) for a, b in zip(group_a, group_b)]
+    # for i in range(num_activated_experts):
+    #     assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
+    print(ms, min_ms, max_ms)
+
+# run simple test case all square same dimension 4 groups of GEMMs
+def test_err():
+    group_m = [1, 1] #[1024, 512, 256, 128] 
+    group_n = [2048, 2048] #[1024, 512, 256, 128]
+    group_k = [5192, 5192] # [1024, 512, 256, 128]
+    group_A = []
+    group_B = []
+    group_B_T = []
+    assert len(group_m) == len(group_n)
+    assert len(group_n) == len(group_k)
+    group_size = len(group_m)
+    for i in range(group_size):
+        M = group_m[i]
+        N = group_n[i]
+        K = group_k[i]
+        A = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
+        B = torch.rand((K, N), device=DEVICE, dtype=torch.float16)
+        B_T = B.T.contiguous()
+        group_A.append(A)
+        group_B.append(B)
+        group_B_T.append(B_T)
+
+    tri_out = group_gemm_fn(group_A, group_B, use_config=True)
+    ref_out = [torch.matmul(a, b) for a, b in zip(group_A, group_B)]
+    # for i in range(group_size):
+    #      assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
+
+# run MoE test
+def test_moe(M=1, N=2048, K=5192, num_experts=128):
+    group_a = []
+    group_b = []
+    num_activated_experts = min(num_experts, M)
+    #print(M, num_activated_experts)
+    a = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
+    b = torch.rand((num_experts, K, N), device=DEVICE, dtype=torch.float16)
+    expert_ids = torch.arange(num_activated_experts, device=a.device, dtype=torch.int32) #.view(-1,1)
+    for m in range(num_activated_experts):
+        group_a.append(torch.unsqueeze(a[m,:], 0))
+        #print(b[expert_ids[m], :, :].shape, torch.unsqueeze(a[m,:], 0).shape)
+        group_b.append(b[expert_ids[m], :, :])
+        # print(group_a[m].shape, group_b[m].shape)
+
+    quantiles = [0.5, 0.2, 0.8]
+    tri_out = group_gemm_fn(group_a, group_b, use_config=True)
+    triton_ms = triton.testing.do_bench(lambda: group_gemm_fn(group_a, group_b, use_config=True), quantiles=quantiles)
+    ref_out = [torch.matmul(a, b) for a, b in zip(group_a, group_b)]
+    for i in range(num_activated_experts):
+        # assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
+        print(torch.max(abs(tri_out[i]-ref_out[i]))/torch.max(ref_out[i]))
+    print(triton_ms)
+
+test_moe(M=4)
+#test_err()
+#test_moe_perf(M=1)
+
+# only launch the kernel, no tensor preparation here to remove all overhead
+def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size):
+    # hardcode config for M
+    config = configs[1]
+    config['NUM_SM']= num_sms() 
+    config.pop('GROUP_SIZE_M', None)
+    grid = lambda META: (META['NUM_SM'], )
+    grouped_matmul_kernel[grid](
+        a_ptrs,
+        b_ptrs,
+        c_ptrs,
+        sizes,
+        lds,
+        group_size,
+        **config,
+        )
 
 
 def torch_perf_fn(group_A, group_B):
@@ -335,7 +458,7 @@ def benchmark_square_matrices(N, provider):
     triton.testing.Benchmark(
         # argument names to use as an x-axis for the plot
         x_names=['M'],
-        x_vals=[2**i for i in range(7, 11)],  # different possible values for `x_name`
+        x_vals=[2**i for i in range(0, 1)],  # different possible values for `x_name`
         line_arg='provider',
         # argument name whose value corresponds to a different line in the plot
         # possible values for `line_arg``
@@ -350,9 +473,9 @@ def benchmark_square_matrices(N, provider):
         args={},
     ))
 def benchmark_batches(M, provider):
-    N = 8192
-    K = 8192
-    group_size = 4
+    N = 2048
+    K = 5192
+    group_size = 1
     group_A = []
     group_B = []
     group_B_T = []
@@ -403,4 +526,4 @@ def benchmark_batches(M, provider):
 
 
 #benchmark_square_matrices.run(show_plots=True, print_data=True)
-#benchmark_batches.run(show_plots=True, print_data=True)
+# benchmark_batches.run(show_plots=True, print_data=True)

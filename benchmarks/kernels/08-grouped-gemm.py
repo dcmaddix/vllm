@@ -121,6 +121,9 @@ def grouped_matmul_kernel(
     num_tiles = num_m_tiles * num_n_tiles
     # ldb = tl.load(g_lds + 1)
     # ldc = tl.load(g_lds  + 2)
+    tl.assume(lda > 0)
+    tl.assume(ldb > 0)
+    tl.assume(ldc > 0)
     for g in range(group_size):
         # get the gemm size of the current problem
         # tl.device_print("group_gemm_sizes", group_gemm_sizes)
@@ -156,10 +159,10 @@ def grouped_matmul_kernel(
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
                 # assume full tile for now
-                a = tl.load(a_ptrs) # FIXME there is an error with the load function
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < gk - kk * BLOCK_SIZE_K, other=0.0) # FIXME there is an error with the load function
                 #a = tl.full((BLOCK_SIZE_M, BLOCK_SIZE_K), value=1, dtype=tl.float16)
                 #tl.full((BLOCK_WIDTH, K_DIM), value=1, dtype=tl.float32)
-                b = tl.load(b_ptrs)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < gk - kk * BLOCK_SIZE_K, other=0.0)
                 #b = tl.full((BLOCK_SIZE_K, BLOCK_SIZE_N), value=1, dtype=tl.float16)
                 accumulator += tl.dot(a, b)
                 # tl.device_print("a", a)
@@ -170,10 +173,11 @@ def grouped_matmul_kernel(
             offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr  + ldc * offs_cm[:, None] + offs_cn[None, :]
+            c_mask = (offs_cm[:, None] < gm) & (offs_cn[None, :] < gn)
 
             # assumes full tile for now
             #tl.store(c_ptrs, tl.full((BLOCK_SIZE_M, BLOCK_SIZE_N), value=1, dtype=tl.float16))
-            tl.store(c_ptrs, c) # invalid read 16 bytes
+            tl.store(c_ptrs, c,  mask=c_mask) # invalid read 16 bytes
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
@@ -222,6 +226,7 @@ def group_gemm_fn(group_A, group_B, use_config=False):
     d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
     # we use a fixed number of CTA, and it's auto-tunable
+    print("M", M)
     config = configs[M]
     config['NUM_SM']= num_sms() 
     config.pop('GROUP_SIZE_M', None)
@@ -272,14 +277,14 @@ def test_moe_perf(M=1, N=2048, K=5192, num_experts=128, use_fp8=False, dtype_fp8
     print(M, num_activated_experts)
     A_total = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
     B_total = torch.rand((num_experts, K, N), device=DEVICE, dtype=torch.float16)
-    config = configs[M]
-    config['NUM_SM']= num_sms() 
-    config.pop('GROUP_SIZE_M', None)
     expert_ids = torch.arange(num_activated_experts, device=DEVICE, dtype=torch.int32) #.view(-1,1)
     for m in range(num_activated_experts):
         A = torch.unsqueeze(A_total[m,:], 0)
         M_e = A.shape[0]
         B = B_total[expert_ids[m], :, :]
+        config = configs[M_e]
+        config['NUM_SM']= num_sms() 
+        config.pop('GROUP_SIZE_M', None)
         if use_fp8:
             A = A.to(dtype_fp8)
             # b = b.T
@@ -304,11 +309,11 @@ def test_moe_perf(M=1, N=2048, K=5192, num_experts=128, use_fp8=False, dtype_fp8
     # d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
     # d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
     # d_g_t_lds = torch.tensor(g_T_lds, dtype=torch.int32, device=DEVICE)
-
+    print(M_e)
     quantiles = [0.5, 0.2, 0.8]
     ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: triton_perf_fn(d_a_ptrs, d_b_ptrs, d_c_ptrs,(1, N, K),
-                                    (K, N, N), num_activated_experts, config), quantiles=quantiles)
+            lambda: triton_perf_fn(d_a_ptrs, d_b_ptrs, d_c_ptrs,(M_e, N, K),
+                                    (A.stride(0), B.stride(0), C.stride(0)), num_activated_experts, config), quantiles=quantiles)
     #ref_out = [torch.matmul(a, b) for a, b in zip(group_a, group_b)]
     # for i in range(num_activated_experts):
     #     assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
@@ -365,9 +370,9 @@ def test_moe(M=1, N=2048, K=5192, num_experts=128):
         print(torch.max(abs(tri_out[i]-ref_out[i]))/torch.max(ref_out[i]))
     print(triton_ms)
 
-test_moe(M=4)
+test_moe(M=1)
 #test_err()
-#test_moe_perf(M=1)
+test_moe_perf(M=1)
 
 # only launch the kernel, no tensor preparation here to remove all overhead
 def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size):

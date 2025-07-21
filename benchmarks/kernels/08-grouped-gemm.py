@@ -226,7 +226,6 @@ def group_gemm_fn(group_A, group_B, use_config=False):
     d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
     # we use a fixed number of CTA, and it's auto-tunable
-    print("M", M)
     config = configs[M]
     config['NUM_SM']= num_sms() 
     config.pop('GROUP_SIZE_M', None)
@@ -372,7 +371,7 @@ def test_moe(M=1, N=2048, K=5192, num_experts=128):
 
 test_moe(M=1)
 #test_err()
-test_moe_perf(M=1)
+test_moe_perf(M=128)
 
 # only launch the kernel, no tensor preparation here to remove all overhead
 def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size):

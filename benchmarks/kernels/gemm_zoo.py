@@ -352,6 +352,7 @@ if __name__ == "__main__":
             # b = b.T
             b = b.to(torch.float8_e4m3fn)
         quantiles = [0.5, 0.2, 0.8]
+        DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
         if not use_fp_8:
             cublas_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)

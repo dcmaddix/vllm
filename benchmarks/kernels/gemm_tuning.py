@@ -127,22 +127,22 @@ def get_configs_compute_bound(is_grouped_gemm=True) -> list[dict[str, int]]:
     # prune the search space.
     block_m_range = [16, 32, 64, 128, 256]
     block_n_range = [32, 64, 128, 256]
-    block_k_range = [64, 128, 256]
+    block_k_range = [32, 64, 128, 256]
     num_warps_range = [4, 8]
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2, 3, 4, 5]
-    num_sm_range = [132, 140]
+    num_sm_range = [84, 128, 132, 140]
 
     param_ranges = {
         "BLOCK_SIZE_M": block_m_range,
         "BLOCK_SIZE_N": block_n_range,
         "BLOCK_SIZE_K": block_k_range,
+        "num_warps": num_warps_range,
+        "num_stages": num_stage_range
     }
 
     if not is_grouped_gemm:
         param_ranges["GROUP_SIZE_M"] = group_m_range
-        param_ranges["num_warps"] = num_warps_range
-        param_ranges["num_stages"] = num_stage_range
     else:
         param_ranges["NUM_SM"] = num_sm_range
 
@@ -231,8 +231,6 @@ def sort_config(config: BenchmarkConfig, is_grouped_gemm=True) -> BenchmarkConfi
             "BLOCK_SIZE_N": config["BLOCK_SIZE_N"],
             "BLOCK_SIZE_K": config["BLOCK_SIZE_K"],
             "GROUP_SIZE_M": config["GROUP_SIZE_M"],
-            "num_warps": config["num_warps"],
-            "num_stages": config["num_stages"],
             **(
                 {"waves_per_eu": config["waves_per_eu"]} if "waves_per_eu" in config else {}
             ),
@@ -248,6 +246,8 @@ def sort_config(config: BenchmarkConfig, is_grouped_gemm=True) -> BenchmarkConfi
             "BLOCK_SIZE_M": config["BLOCK_SIZE_M"],
             "BLOCK_SIZE_N": config["BLOCK_SIZE_N"],
             "BLOCK_SIZE_K": config["BLOCK_SIZE_K"],
+            "num_warps": config["num_warps"],
+            "num_stages": config["num_stages"],
             "NUM_SM": config["NUM_SM"],
             **(
                 {"waves_per_eu": config["waves_per_eu"]} if "waves_per_eu" in config else {}
@@ -294,8 +294,8 @@ def main(args: argparse.Namespace):
             32,
             64,
             128,
-            1024,
-            4096,
+            #1024,
+            #4096,
         ]
     else:
         batch_sizes = args.batch_size

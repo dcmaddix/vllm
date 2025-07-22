@@ -179,6 +179,101 @@ def matmul_kernel_2d(
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
+@triton.jit
+def grouped_matmul_kernel(
+    # device tensor of matrices pointers
+    group_a_ptrs,
+    group_b_ptrs,
+    group_c_ptrs,
+    # device tensor of gemm sizes. its shape is [group_size, 3]
+    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
+    group_gemm_sizes,
+    # device tensor of leading dimension sizes. its shape is [group_size, 3]
+    # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
+    g_lds,
+    # number of gemms
+    group_size,
+    # number of virtual SM
+    NUM_SM: tl.constexpr,
+    # tile sizes
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    tile_idx = tl.program_id(0)
+    last_problem_end = 0
+    gm, gn, gk = group_gemm_sizes
+    lda, ldb, ldc = g_lds
+    # lda = tl.load(g_lds)
+    num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
+    num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
+    num_tiles = num_m_tiles * num_n_tiles
+    # ldb = tl.load(g_lds + 1)
+    # ldc = tl.load(g_lds  + 2)
+    tl.assume(lda > 0)
+    tl.assume(ldb > 0)
+    tl.assume(ldc > 0)
+    for g in range(group_size):
+        # get the gemm size of the current problem
+        # tl.device_print("group_gemm_sizes", group_gemm_sizes)
+        #tl.device_print("gm", gm)
+        #tl.device_print("group_size", group_size)
+        #tl.device_print("gn", gn)
+        # tl.device_print("gk", gk)
+        # print("num_m_tiles", num_m_tiles)
+        # print("num_n_tiles", num_n_tiles)
+        # print("num_tiles", num_tiles)
+        # iterate through the tiles in the current gemm problem
+        while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
+            # pick up a tile from the current gemm problem
+            k = gk
+            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
+            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
+            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
+            # tl.device_print("a_ptr", a_ptr)
+            # figure out tile coordinates
+            tile_idx_in_gemm = tile_idx - last_problem_end
+            tile_m_idx = tile_idx_in_gemm // num_n_tiles
+            tile_n_idx = tile_idx_in_gemm % num_n_tiles
+
+            # do regular gemm here
+            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_k = tl.arange(0, BLOCK_SIZE_K)
+            a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
+            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
+            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+            for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
+                # hint to Triton compiler to do proper loop pipelining
+                tl.multiple_of(a_ptrs, [16, 16])
+                tl.multiple_of(b_ptrs, [16, 16])
+                # assume full tile for now
+                a = tl.load(a_ptrs, mask=offs_k[None, :] < gk - kk * BLOCK_SIZE_K, other=0.0) # FIXME there is an error with the load function
+                #a = tl.full((BLOCK_SIZE_M, BLOCK_SIZE_K), value=1, dtype=tl.float16)
+                #tl.full((BLOCK_WIDTH, K_DIM), value=1, dtype=tl.float32)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < gk - kk * BLOCK_SIZE_K, other=0.0)
+                #b = tl.full((BLOCK_SIZE_K, BLOCK_SIZE_N), value=1, dtype=tl.float16)
+                accumulator += tl.dot(a, b)
+                # tl.device_print("a", a)
+                a_ptrs += BLOCK_SIZE_K  # no lda here
+                b_ptrs += BLOCK_SIZE_K * ldb
+            c = accumulator.to(tl.float16)
+
+            offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            c_ptrs = c_ptr  + ldc * offs_cm[:, None] + offs_cn[None, :]
+            c_mask = (offs_cm[:, None] < gm) & (offs_cn[None, :] < gn)
+
+            # assumes full tile for now
+            #tl.store(c_ptrs, tl.full((BLOCK_SIZE_M, BLOCK_SIZE_N), value=1, dtype=tl.float16))
+            tl.store(c_ptrs, c,  mask=c_mask) # invalid read 16 bytes
+
+            # go to the next tile by advancing NUM_SM
+            tile_idx += NUM_SM
+
+        # get ready to go to the next gemm problem
+        last_problem_end = last_problem_end + num_tiles
+
 def matmul(a, b, num_experts, config):
     if num_experts > 1:
         top_k_num = 1
@@ -226,120 +321,89 @@ def matmul(a, b, num_experts, config):
         )
     return c
 
-@triton.jit
-def grouped_matmul_kernel(
-    # device tensor of matrices pointers
-    group_a_ptrs,
-    group_b_ptrs,
-    group_c_ptrs,
-    # device tensor of gemm sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <M, N, K> of each gemm
-    group_gemm_sizes,
-    # device tensor of leading dimension sizes. its shape is [group_size, 3]
-    # dim 0 is group_size, dim 1 is the values of <lda, ldb, ldc> of each gemm
-    g_lds,
-    # number of gemms
-    group_size,
-    # number of virtual SM
-    NUM_SM: tl.constexpr,
-    # tile sizes
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    tile_idx = tl.program_id(0)
-    last_problem_end = 0
-    for g in range(group_size):
-        # get the gemm size of the current problem
-        gm = tl.load(group_gemm_sizes + g * 3)
-        gn = tl.load(group_gemm_sizes + g * 3 + 1)
-        gk = tl.load(group_gemm_sizes + g * 3 + 2)
-        num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
-        num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
-        num_tiles = num_m_tiles * num_n_tiles
-        # iterate through the tiles in the current gemm problem
-        while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
-            # pick up a tile from the current gemm problem
-            k = gk
-            lda = tl.load(g_lds + g * 3)
-            ldb = tl.load(g_lds + g * 3 + 1)
-            ldc = tl.load(g_lds + g * 3 + 2)
-            a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
-            b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
-            c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
-            # figure out tile coordinates
-            tile_idx_in_gemm = tile_idx - last_problem_end
-            tile_m_idx = tile_idx_in_gemm // num_n_tiles
-            tile_n_idx = tile_idx_in_gemm % num_n_tiles
+# only launch the kernel, no tensor preparation here to remove all overhead
+def triton_perf_fn(a_ptrs, b_ptrs, c_ptrs, sizes, lds, group_size, config):
+    grid = lambda META: (META['NUM_SM'],)
+    grouped_matmul_kernel[grid](
+        a_ptrs,
+        b_ptrs,
+        c_ptrs,
+        sizes,
+        lds,
+        group_size,
+        **config,
+    )
 
-            # do regular gemm here
-            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            offs_k = tl.arange(0, BLOCK_SIZE_K)
-            a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
-            b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
-                # hint to Triton compiler to do proper loop pipelining
-                tl.multiple_of(a_ptrs, [16, 16])
-                tl.multiple_of(b_ptrs, [16, 16])
-                # assume full tile for now
-                a = tl.load(a_ptrs)
-                b = tl.load(b_ptrs)
-                accumulator += tl.dot(a, b)
-                a_ptrs += BLOCK_SIZE_K
-                b_ptrs += BLOCK_SIZE_K * ldb
-            c = accumulator.to(tl.float16)
+def is_cuda():
+    return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
-            offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
+def num_sms():
+    if is_cuda():
+        return torch.cuda.get_device_properties("cuda").multi_processor_count
+    return 148
 
-            # assumes full tile for now
-            tl.store(c_ptrs, c)
+def test_moe_perf(config, M=1, N=2048, K=5120, num_experts=128, use_fp8=False, dtype_fp8 = torch.float8_e4m3fn):
+    group_A = []
+    group_B = []
+    A_addrs = []
+    B_addrs = []
+    C_addrs = []
+    group_C = []
+    num_activated_experts = min(num_experts, M)
+    A_total = torch.rand((M, K), device=DEVICE, dtype=torch.float16)
+    B_total = torch.rand((num_experts, K, N), device=DEVICE, dtype=torch.float16)
+    expert_ids = torch.arange(num_activated_experts, device=DEVICE, dtype=torch.int32) #.view(-1,1)
+    for m in range(num_activated_experts):
+        A = torch.unsqueeze(A_total[m,:], 0)
+        M_e = A.shape[0]
+        B = B_total[expert_ids[m], :, :]
+        config = configs[M_e]
+        config['NUM_SM']= num_sms() 
+        config.pop('GROUP_SIZE_M', None)
+        if use_fp8:
+            A = A.to(dtype_fp8)
+            # b = b.T
+            B = B.to(dtype_fp8)
+        C = torch.empty((M_e, N), device=DEVICE, dtype=torch.float16)
 
-            # go to the next tile by advancing NUM_SM
-            tile_idx += NUM_SM
+        group_A.append(A)
+        group_B.append(B)
+        group_C.append(C)
+        A_addrs.append(A.data_ptr())
+        B_addrs.append(B.data_ptr())
+        C_addrs.append(C.data_ptr())
+        # g_sizes += [M_e, N, K]
+        # g_lds += [A.stride(0), B.stride(0), C.stride(0)]
+        # g_T_lds += [A.stride(0), B_T.stride(0), C.stride(0)]
 
-        # get ready to go to the next gemm problem
-        last_problem_end = last_problem_end + num_tiles
-
-triton.jit
-def mat_vec_kernel(
-    vec_ptr,
-    matrix_ptr,
-    out_ptr,
-    vec_stridex,
-    matrix_stridey,
-    matrix_stridex,
-    out_stridex,
-    BLOCK_SIZE_M: tl.constexpr,
-):
-    vec_ptr = vec_ptr + vec_stridex * tl.arange(0, BLOCK_SIZE_M)
-    #vec_ptr = tl.reshape(vec_ptr, (BLOCK_SIZE_M, 1))
-
-    out_ptr = out_ptr + out_stridex * tl.arange(0, BLOCK_SIZE_M)
-    #out_ptr = tl.reshape(out_ptr, (BLOCK_SIZE_M, 1))
-
-    matrix_x = matrix_stridex * tl.arange(0, BLOCK_SIZE_M)
-    matrix_y = matrix_stridey * tl.arange(0, BLOCK_SIZE_M)
-
-    matrix_ptr = matrix_ptr + (matrix_x[None, :] + matrix_y[:, None])
-    # TODO: add in 
-    # tl.sum(val[:, None] * matrix, 0)
-
-    val = tl.load(vec_ptr).to(tl.float32)
-    matrix = tl.load(matrix_ptr).to(tl.float32)
-    tl.store(out_ptr, tl.sum(val[:, None] * matrix, 0))
+    d_a_ptrs = torch.tensor(A_addrs, device=DEVICE)
+    d_b_ptrs = torch.tensor(B_addrs, device=DEVICE)
+    #d_b_t_ptrs = torch.tensor(B_T_addrs, device=DEVICE)
+    d_c_ptrs = torch.tensor(C_addrs, device=DEVICE)
+    # d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
+    # d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
+    # d_g_t_lds = torch.tensor(g_T_lds, dtype=torch.int32, device=DEVICE)
+    quantiles = [0.5, 0.2, 0.8]
+    ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: triton_perf_fn(d_a_ptrs, d_b_ptrs, d_c_ptrs,(M_e, N, K),
+                                    (A.stride(0), B.stride(0), C.stride(0)), num_activated_experts, config), quantiles=quantiles)
+    #ref_out = [torch.matmul(a, b) for a, b in zip(group_a, group_b)]
+    # for i in range(num_activated_experts):
+    #     assert torch.allclose(ref_out[i], tri_out[i], atol=1e-2, rtol=1e-2)
+    return group_A, group_B, group_C
 
 if __name__ == "__main__":
     K = 5120
     N = 2048 # divde by 8 and multipyl by 2
     niter= 10
     use_fp_8 = True
-    num_experts = 8
-    configs = get_config(config_file_path = "/home/ubuntu/vllm/benchmarks/kernels/config.json")
-    for M in [1,2,8,16,32,64]:
+    num_experts = 128
+    if use_fp_8:
+        dtype = "fp8"
+    else:
+        dtype = "fp16"
+    configs = get_config(config_file_path = f"/home/ubuntu/vllm/benchmarks/kernels/configs_groups={num_experts}_N={N}_K={5120}_{dtype}.json")
+    for M in [1,2,8,16,32,64, 128]:
         config = configs[M]
         a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
         if num_experts > 1:
@@ -352,7 +416,6 @@ if __name__ == "__main__":
             # b = b.T
             b = b.to(torch.float8_e4m3fn)
         quantiles = [0.5, 0.2, 0.8]
-        DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
         if not use_fp_8:
             cublas_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
@@ -361,3 +424,9 @@ if __name__ == "__main__":
         else:
             triton_ms = triton.testing.do_bench(lambda: matmul(a, b, num_experts, config), quantiles=quantiles)
         print("M", M, "tritonms", triton_ms)
+
+        # Test grouped GEMM
+        group_A, group_B, group_C = test_moe_perf(M)
+        for i in range(M):
+            ref = torch.matmul(group_A[i], group_B[i])
+            assert torch.allclose(group_C[i], ref, atol=1e-2, rtol=1e-2)

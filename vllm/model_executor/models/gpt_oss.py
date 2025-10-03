@@ -157,7 +157,7 @@ class MLPBlock(torch.nn.Module):
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
-                                has_bias=False, #FIXME
+                                has_bias=True,
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -634,8 +634,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ".down_proj": ".w2_weight",
 
             # # MoE Bias
-            # ".gate_up_proj_bias": ".w13_bias",
-            # ".down_proj_bias": ".w2_bias",
+            ".gate_up_proj_bias": ".w13_bias",
+            ".down_proj_bias": ".w2_bias",
         },
     )
 

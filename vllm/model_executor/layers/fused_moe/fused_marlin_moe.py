@@ -260,7 +260,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        # assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
     @override

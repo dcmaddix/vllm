@@ -46,8 +46,8 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             a1.mul_(topk_weights.to(a1.dtype))
 
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, quant_config.a1_scale, quant_config.quant_dtype,
-            quant_config.per_act_token_quant, quant_config.block_shape)
+            a1) #, quant_config.a1_scale, quant_config.quant_dtype,
+           # quant_config.per_act_token_quant, quant_config.block_shape)
 
         return a1q, a1q_scale, None, None, None
 

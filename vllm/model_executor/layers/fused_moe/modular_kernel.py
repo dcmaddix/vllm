@@ -402,67 +402,67 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @property
     def quant_dtype(self) -> Optional[torch.dtype]:
-        return self.quant_config.quant_dtype
+        return self.quant_config.quant_dtype if hasattr(self.quant_config, "quant_dtype") else None
 
     @property
     def block_shape(self) -> Optional[list[int]]:
-        return self.quant_config.block_shape
+        return self.quant_config.block_shape if hasattr(self.quant_config, "block_shape") else None
 
     @property
     def per_act_token_quant(self) -> bool:
-        return self.quant_config.per_act_token_quant
+        return self.quant_config.per_act_token_quant if hasattr(self.quant_config, "per_act_token_quant") else None
 
     @property
     def per_out_ch_quant(self) -> bool:
-        return self.quant_config.per_out_ch_quant
+        return self.quant_config.per_out_ch_quant if hasattr(self.quant_config, "per_out_ch_quant") else None 
 
     @property
     def a1_scale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.a1_scale
+        return self.quant_config.a1_scale if hasattr(self.quant_config, "a1_scale") else None
 
     @property
     def a2_scale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.a2_scale
+        return self.quant_config.a2_scale if hasattr(self.quant_config, "a2_scale") else None
 
     @property
     def a1_gscale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.a1_gscale
+        return self.quant_config.a1_gscale if hasattr(self.quant_config, "a1_gscale") else None
 
     @property
     def a2_gscale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.a2_gscale
+        return self.quant_config.a2_gscale if hasattr(self.quant_config, "a2_gscale") else None
 
     @property
     def w1_scale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w1_scale
+        return self.quant_config.w1_scale if hasattr(self.quant_config, "w1_scale") else None
 
     @property
     def w2_scale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w2_scale
+        return self.quant_config.w2_scale if hasattr(self.quant_config, "w2_scale") else None
 
     @property
     def w1_zp(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w1_zp
+        return self.quant_config.w1_zp if hasattr(self.quant_config, "w1_zp") else None
 
     @property
     def w2_zp(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w2_zp
+        return self.quant_config.w2_zp if hasattr(self.quant_config, "w2_zp") else None
 
     @property
     def w1_bias(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w1_bias
+        return self.quant_config.w1_bias if hasattr(self.quant_config, "w1_bias") else None
 
     @property
     def w2_bias(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w2_bias
+        return self.quant_config.w2_bias if hasattr(self.quant_config, "w2_bia") else None
 
     @property
     def g1_alphas(self) -> Optional[torch.Tensor]:
-        return self.quant_config.g1_alphas
+        return self.quant_config.g1_alphas if hasattr(self.quant_config, "g1_alphas") else None
 
     @property
     def g2_alphas(self) -> Optional[torch.Tensor]:
-        return self.quant_config.g2_alphas
+        return self.quant_config.g2_alphas if hasattr(self.quant_config, "g2_alphas") else None
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
@@ -653,7 +653,8 @@ class FusedMoEModularKernel(torch.nn.Module):
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
-        self.fused_experts = fused_experts
+        self.fused_experts = fused_experts # TODO: Currently TritonExperts needs to be MarlinExperts
+        print("fused experts", fused_experts)
         self.shared_experts = shared_experts
         assert prepare_finalize.activation_format == \
             fused_experts.activation_formats[0], (

@@ -36,6 +36,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from .fused_marlin_moe import MarlinExperts
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1898,8 +1899,9 @@ def modular_triton_fused_moe(
     quant_config: FusedMoEQuantConfig,
     shared_experts: Optional[torch.nn.Module] = None
 ) -> mk.FusedMoEModularKernel:
+    print("quant config!", quant_config)
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
+        MarlinExperts(quant_config), # if isinstance(quant_config, Mxfp4Config) else TritonExperts(quant_config), # link to marlin here!
         shared_experts,
     )

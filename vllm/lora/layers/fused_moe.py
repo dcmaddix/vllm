@@ -61,6 +61,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def fwd_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
+                print("WRAPPER")
                 self.base_layer._lora["hidden_states"] = kwargs[
                     "hidden_states"]
                 self.base_layer._lora["topk_ids"] = kwargs["topk_ids"]
@@ -78,6 +79,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def act_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
+                print("WRAPPER")
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]
@@ -215,6 +217,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             shared_experts=base_layer.shared_experts)
 
         fused_experts = m_fused_moe_fn.fused_experts
+        print("fused experts", fused_experts)
 
         m_fused_moe_fn.forward = fwd_decorator(base_layer,
                                                m_fused_moe_fn.forward)

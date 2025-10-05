@@ -352,8 +352,8 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert self.w1_scale is not None # FIXME: Pass scale
+        assert self.w2_scale is not None # FIXME: Pass scale
         return fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
@@ -375,3 +375,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # output buffer allocation. Please refer to workspace_shapes().
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)

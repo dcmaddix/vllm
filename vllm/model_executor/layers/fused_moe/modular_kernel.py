@@ -653,7 +653,7 @@ class FusedMoEModularKernel(torch.nn.Module):
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
-        self.fused_experts = fused_experts # TODO: Currently TritonExperts needs to be MarlinExperts
+        self.fused_experts = fused_experts
         print("fused experts", fused_experts)
         self.shared_experts = shared_experts
         assert prepare_finalize.activation_format == \

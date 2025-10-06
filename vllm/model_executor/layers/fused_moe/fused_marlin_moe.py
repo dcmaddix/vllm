@@ -286,6 +286,144 @@ direct_register_custom_op(
 _MARLIN_LORA_LAYER_REF = None
 
 
+def fused_marlin_moe_unreduced(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    bias1: Optional[torch.Tensor],
+    bias2: Optional[torch.Tensor],
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    gating_output: Optional[torch.Tensor],
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_type_id: int,
+    apply_router_weight_on_input: bool = False,
+    global_num_experts: int = -1,
+    activation: Optional[str] = "silu",
+    expert_map: Optional[torch.Tensor] = None,
+    global_scale1: Optional[torch.Tensor] = None,
+    global_scale2: Optional[torch.Tensor] = None,
+    g_idx1: Optional[torch.Tensor] = None,
+    g_idx2: Optional[torch.Tensor] = None,
+    sort_indices1: Optional[torch.Tensor] = None,
+    sort_indices2: Optional[torch.Tensor] = None,
+    w1_zeros: Optional[torch.Tensor] = None,
+    w2_zeros: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
+    intermediate_cache13: Optional[torch.Tensor] = None,
+    intermediate_cache2: Optional[torch.Tensor] = None,
+    is_k_full: bool = True,
+) -> torch.Tensor:
+    """Unreduced version of fused_marlin_moe that returns (M, topk, K) tensor.
+    
+    This allows external code (e.g., LoRA decorators) to intercept the reduction.
+    """
+    # Call original function but extract the unreduced result before sum
+    quant_type = ScalarType.from_id(quant_type_id)
+    assert quant_type in [
+        scalar_types.uint4, scalar_types.uint8b128, scalar_types.uint4b8,
+        scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f
+    ]
+
+    bit4_scalar_types = [
+        scalar_types.uint4, scalar_types.uint4b8, scalar_types.float4_e2m1f
+    ]
+    num_bits = 4 if quant_type in bit4_scalar_types else 8
+
+    if gating_output is not None:
+        assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    assert hidden_states.shape[1] == w1.shape[1] * 16, "Hidden size mismatch w1"
+    assert hidden_states.shape[1] == w2.shape[2] // (num_bits // 2), "Hidden size mismatch w2"
+    assert hidden_states.is_contiguous()
+    assert w1.is_contiguous() and w2.is_contiguous()
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
+    assert topk_weights.dtype == torch.float32
+
+    M, K = hidden_states.shape
+    E = w1.shape[0]
+    N = marlin_moe_intermediate_size(w1, w2)
+    topk = topk_ids.shape[1]
+
+    for block_size_m in [8, 16, 32, 48, 64]:
+        if M * topk / E / block_size_m < 0.9:
+            break
+
+    if global_num_experts == -1:
+        global_num_experts = E
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids, block_size_m, global_num_experts, expert_map
+    )
+
+    if workspace is None:
+        workspace = marlin_make_workspace_new(hidden_states.device, 4)
+
+    if intermediate_cache2 is None:
+        intermediate_cache2 = torch.empty(
+            (M * topk, N), device=hidden_states.device, dtype=hidden_states.dtype
+        )
+
+    if intermediate_cache13 is None:
+        intermediate_cache13 = torch.empty(
+            (M * topk * max(2 * N, K),), device=hidden_states.device, dtype=hidden_states.dtype
+        )
+
+    intermediate_cache1 = _resize_cache(intermediate_cache13, (M * topk, 2 * N))
+    intermediate_cache3 = _resize_cache(intermediate_cache13, (M * topk, K))
+    intermediate_cache2 = _resize_cache(intermediate_cache2, (M * topk, N))
+
+    maybe_warn_marlin_atomic_add(hidden_states.device, hidden_states.dtype)
+    use_atomic_add = (
+        hidden_states.dtype == torch.half
+        or torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
+    )
+
+    intermediate_cache1 = ops.moe_wna16_marlin_gemm(
+        hidden_states, intermediate_cache1, w1, bias1, w1_scale, global_scale1,
+        w1_zeros, g_idx1, sort_indices1, workspace, sorted_token_ids, expert_ids,
+        num_tokens_post_padded, topk_weights, moe_block_size=block_size_m,
+        top_k=topk, mul_topk_weights=apply_router_weight_on_input,
+        is_ep=expert_map is not None, b_q_type=quant_type, size_m=M,
+        size_n=2 * N, size_k=K, is_k_full=is_k_full, use_atomic_add=use_atomic_add,
+        use_fp32_reduce=True, is_zp_float=False
+    )
+
+    # LoRA activation injection
+    if _MARLIN_LORA_LAYER_REF is not None:
+        layer = _MARLIN_LORA_LAYER_REF
+        if hasattr(layer, '_lora') and 'marlin_activation_context' in layer._lora:
+            ctx = layer._lora['marlin_activation_context']
+            layer.punica_wrapper.add_lora_fused_moe(
+                intermediate_cache1.view(-1, topk, intermediate_cache1.shape[-1]),
+                hidden_states, ctx["w13_lora_a_stacked"], ctx["w13_lora_b_stacked"],
+                ctx["topk_weights"], ctx["sorted_token_ids_lora"], ctx["expert_ids_lora"],
+                ctx["num_tokens_post_padded_lora"], ctx["max_lora_rank"], topk, ctx["config"]
+            )
+            print("[Marlin unreduced] LoRA activation injection completed")
+
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
+    elif activation == "swigluoai":
+        torch.ops._C.swigluoai_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
+    else:
+        raise ValueError(f"Unsupported activation: {activation}")
+
+    if expert_map is not None:
+        intermediate_cache3.zero_()
+
+    intermediate_cache3 = ops.moe_wna16_marlin_gemm(
+        intermediate_cache2, intermediate_cache3, w2, bias2, w2_scale, global_scale2,
+        w2_zeros, g_idx2, sort_indices2, workspace, sorted_token_ids, expert_ids,
+        num_tokens_post_padded, topk_weights, moe_block_size=block_size_m,
+        top_k=1, mul_topk_weights=not apply_router_weight_on_input,
+        is_ep=expert_map is not None, b_q_type=quant_type, size_m=M * topk,
+        size_n=K, size_k=N, is_k_full=is_k_full, use_atomic_add=use_atomic_add,
+        use_fp32_reduce=True, is_zp_float=False
+    ).view(-1, topk, K)
+
+    return intermediate_cache3  # (M, topk, K)
+
+
 class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self, quant_config: FusedMoEQuantConfig):
@@ -382,10 +520,11 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert self.w1_scale is not None # FIXME: Pass scale
-        assert self.w2_scale is not None # FIXME: Pass scale
+        assert self.w1_scale is not None  # FIXME: Pass scale
+        assert self.w2_scale is not None  # FIXME: Pass scale
         
-        return fused_marlin_moe(
+        # Use unreduced version to get (M, topk, K) tensor
+        unreduced = fused_marlin_moe_unreduced(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -396,16 +535,18 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_type_id=scalar_types.float4_e2m1f.id,  # works only for w4a16
+            quant_type_id=scalar_types.float4_e2m1f.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
-            output=output,
-            # Workspaces are swapped in workspace_shapes() to account for proper
-            # output buffer allocation. Please refer to workspace_shapes().
             intermediate_cache13=workspace2,
-            intermediate_cache2=workspace13)
+            intermediate_cache2=workspace13,
+        )
+        
+        # Call moe_sum so the decorator can intercept
+        self.moe_sum(unreduced, output)
+        return output
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)

@@ -243,54 +243,66 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             def wrapper(*args, **kwargs):
                 print("=== WRAPPER moe_sum CALLED ===")
-                hidden_states = layer._lora["hidden_states"]
-                topk_weights = layer._lora["topk_weights"]
-                curr_topk_ids = layer._lora["topk_ids"]
+                
+                # Check if we have Marlin-specific context (mxfp4 path)
+                if hasattr(layer, '_lora') and 'marlin_activation_context' in layer._lora:
+                    # Marlin path: For now skip w2 LoRA in moe_sum since Marlin doesn't
+                    # expose intermediate_cache2 (activated output) easily.
+                    # W1/W3 LoRA is already applied in the activation hook.
+                    # TODO: Refactor Marlin to expose intermediate for w2 LoRA
+                    print("[moe_sum_decorator] Marlin path: w2 LoRA skipped (w1/w3 already applied)")
+                    pass
+                else:
+                    # Triton path: context was set in act_decorator
+                    hidden_states = layer._lora["hidden_states"]
+                    topk_weights = layer._lora["topk_weights"]
+                    curr_topk_ids = layer._lora["topk_ids"]
 
-                config_dtype = get_config_dtype_str(use_fp8_w8a8=False,
-                                                    use_int8_w8a16=False,
-                                                    use_int4_w4a16=False,
-                                                    use_mxfp4_w4a4=False,
-                                                    dtype=hidden_states.dtype)
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-                num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                    config_dtype = get_config_dtype_str(use_fp8_w8a8=False,
+                                                        use_int8_w8a16=False,
+                                                        use_int4_w4a16=False,
+                                                        use_mxfp4_w4a4=False,
+                                                        dtype=hidden_states.dtype)
+                    CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+                    num_tokens = hidden_states.size(0)
+                    M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.
-                    block_shape,
-                )
+                    get_config_func = functools.partial(
+                        try_get_optimal_moe_config,
+                        layer.w13_weight.size(),
+                        layer.w2_weight.size(),
+                        top_k,
+                        config_dtype,
+                        block_shape=layer.quant_method.moe_quant_config.
+                        block_shape,
+                    )
 
-                config = get_config_func(M)
-                w1_lora_a_stacked = layer.w1_lora_a_stacked
-                w2_lora_a_stacked = layer.w2_lora_a_stacked
-                w2_lora_b_stacked = layer.w2_lora_b_stacked
+                    config = get_config_func(M)
+                    w1_lora_a_stacked = layer.w1_lora_a_stacked
+                    w2_lora_a_stacked = layer.w2_lora_a_stacked
+                    w2_lora_b_stacked = layer.w2_lora_b_stacked
 
-                max_lora_rank = w1_lora_a_stacked.shape[-2]
+                    max_lora_rank = w1_lora_a_stacked.shape[-2]
 
-                sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
-                expert_ids_lora = layer._lora["expert_ids_lora"]
-                num_tokens_post_padded_lora = layer._lora[
-                    "num_tokens_post_padded_lora"]
+                    sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
+                    expert_ids_lora = layer._lora["expert_ids_lora"]
+                    num_tokens_post_padded_lora = layer._lora[
+                        "num_tokens_post_padded_lora"]
 
-                expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1],
-                                                       -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(
-                    curr_topk_ids.shape[-1], -1)
-                intermediate_cache2 = layer._lora["intermediate_cache2"]
-                intermediate_cache3 = args[0]
+                    expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1],
+                                                           -1)
+                    sorted_token_ids_lora = sorted_token_ids_lora.view(
+                        curr_topk_ids.shape[-1], -1)
+                    intermediate_cache2 = layer._lora["intermediate_cache2"]
+                    intermediate_cache3 = args[0]
 
-                layer.punica_wrapper.add_lora_fused_moe(
-                    intermediate_cache3, intermediate_cache2,
-                    [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
-                    sorted_token_ids_lora, expert_ids_lora,
-                    num_tokens_post_padded_lora, max_lora_rank, top_k, config,
-                    True)
+                    layer.punica_wrapper.add_lora_fused_moe(
+                        intermediate_cache3, intermediate_cache2,
+                        [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
+                        sorted_token_ids_lora, expert_ids_lora,
+                        num_tokens_post_padded_lora, max_lora_rank, top_k, config,
+                        True)
+                    print("[moe_sum_decorator] Applied w2 LoRA on Triton path")
 
                 result = func(*args, **kwargs)
                 return result

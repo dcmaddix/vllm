@@ -193,9 +193,9 @@ def _mxfp8_quantize(
 
 def moe_kernel_quantize_input(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor] = None,
-    quant_dtype: Optional[Union[None, torch.dtype, str]] = None,
-    per_act_token_quant: Optional[bool] = None,
+    A_scale: Optional[torch.Tensor],
+    quant_dtype: Union[None, torch.dtype, str],
+    per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
     is_fp4_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:

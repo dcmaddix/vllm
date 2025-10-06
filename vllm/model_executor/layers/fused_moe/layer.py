@@ -49,7 +49,6 @@ if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
                             fused_experts)
-    from .fused_marlin_moe import (MarlinExperts)
     if has_pplx():
         from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
                                             pplx_hidden_dim_scale_bytes)

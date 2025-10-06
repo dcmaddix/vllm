@@ -408,6 +408,12 @@ def fused_marlin_moe_unreduced(
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
+    # Store intermediate_cache2 for w2 LoRA application in moe_sum_decorator
+    if _MARLIN_LORA_LAYER_REF is not None:
+        layer = _MARLIN_LORA_LAYER_REF
+        if hasattr(layer, '_lora'):
+            layer._lora["marlin_intermediate_cache2"] = intermediate_cache2
+
     if expert_map is not None:
         intermediate_cache3.zero_()
 

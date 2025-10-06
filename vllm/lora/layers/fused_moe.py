@@ -246,12 +246,36 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 
                 # Check if we have Marlin-specific context (mxfp4 path)
                 if hasattr(layer, '_lora') and 'marlin_activation_context' in layer._lora:
-                    # Marlin path: For now skip w2 LoRA in moe_sum since Marlin doesn't
-                    # expose intermediate_cache2 (activated output) easily.
-                    # W1/W3 LoRA is already applied in the activation hook.
-                    # TODO: Refactor Marlin to expose intermediate for w2 LoRA
-                    print("[moe_sum_decorator] Marlin path: w2 LoRA skipped (w1/w3 already applied)")
-                    pass
+                    # Marlin path: Apply w2 LoRA using stored intermediate
+                    ctx = layer._lora['marlin_activation_context']
+                    hidden_states = layer._lora["hidden_states"]
+                    topk_weights = ctx["topk_weights"]
+                    curr_topk_ids = layer._lora["topk_ids"]
+                    
+                    w2_lora_a_stacked = layer.w2_lora_a_stacked
+                    w2_lora_b_stacked = layer.w2_lora_b_stacked
+                    max_lora_rank = ctx["max_lora_rank"]
+                    
+                    sorted_token_ids_lora = ctx["sorted_token_ids_lora"]
+                    expert_ids_lora = ctx["expert_ids_lora"]
+                    num_tokens_post_padded_lora = ctx["num_tokens_post_padded_lora"]
+                    config = ctx["config"]
+                    
+                    # Get the activated intermediate from Marlin kernel
+                    intermediate_cache2 = layer._lora.get("marlin_intermediate_cache2")
+                    intermediate_cache3 = args[0]
+                    
+                    if intermediate_cache2 is not None:
+                        # Apply w2 LoRA
+                        layer.punica_wrapper.add_lora_fused_moe(
+                            intermediate_cache3, intermediate_cache2,
+                            [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
+                            sorted_token_ids_lora, expert_ids_lora,
+                            num_tokens_post_padded_lora, max_lora_rank, top_k, config,
+                            True)
+                        print("[moe_sum_decorator] Applied w2 LoRA on Marlin path")
+                    else:
+                        print("[moe_sum_decorator] Marlin path: intermediate_cache2 not found, w2 LoRA skipped")
                 else:
                     # Triton path: context was set in act_decorator
                     hidden_states = layer._lora["hidden_states"]

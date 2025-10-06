@@ -1894,13 +1894,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
 
-
 def modular_triton_fused_moe(
     quant_config: FusedMoEQuantConfig,
     shared_experts: Optional[torch.nn.Module] = None
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        MarlinExperts(quant_config), # if isinstancef(quant_config, Mxfp4Config) else TritonExperts(quant_config), # link to marlin here!
+        TritonExperts(quant_config) if not quant_config.use_mxfp4_w4a16 \
+            else MarlinExperts(quant_config), # link to marlin here!
         shared_experts,
     )

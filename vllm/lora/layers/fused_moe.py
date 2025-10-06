@@ -14,7 +14,7 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -56,12 +56,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         base_layer = self.base_layer
         base_layer._lora = {}
         top_k = base_layer.top_k
-        quant_config = base_layer.quant_config
+        #quant_config = base_layer.quant_config
+        quant_config = mxfp4_w4a16_moe_quant_config(
+                w1_bias=base_layer.w13_bias,
+                w2_bias=base_layer.w2_bias,
+                w1_scale=base_layer.w13_weight_scale,
+                w2_scale=base_layer.w2_weight_scale,
+            )
 
         def fwd_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
-                print("WRAPPER")
+                print("WRAPPER fwd")
                 self.base_layer._lora["hidden_states"] = kwargs[
                     "hidden_states"]
                 self.base_layer._lora["topk_ids"] = kwargs["topk_ids"]
@@ -79,7 +85,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def act_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
-                print("WRAPPER")
+                print("WRAPPER act")
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]
@@ -217,7 +223,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             shared_experts=base_layer.shared_experts)
 
         fused_experts = m_fused_moe_fn.fused_experts
-        print("fused experts", fused_experts)
 
         m_fused_moe_fn.forward = fwd_decorator(base_layer,
                                                m_fused_moe_fn.forward)

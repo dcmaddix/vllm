@@ -434,8 +434,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @property
     def w1_scale(self) -> Optional[torch.Tensor]:
-        return self.quant_config.w1_scale if hasattr(self.quant_config, "w1_scale") else None
-
+        return self.quant_config.w1_scale
     @property
     def w2_scale(self) -> Optional[torch.Tensor]:
         return self.quant_config.w2_scale if hasattr(self.quant_config, "w2_scale") else None

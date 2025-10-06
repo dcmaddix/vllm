@@ -1899,9 +1899,8 @@ def modular_triton_fused_moe(
     quant_config: FusedMoEQuantConfig,
     shared_experts: Optional[torch.nn.Module] = None
 ) -> mk.FusedMoEModularKernel:
-    print("quant config!", quant_config)
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        MarlinExperts(quant_config), # if isinstance(quant_config, Mxfp4Config) else TritonExperts(quant_config), # link to marlin here!
+        MarlinExperts(quant_config), # if isinstancef(quant_config, Mxfp4Config) else TritonExperts(quant_config), # link to marlin here!
         shared_experts,
     )

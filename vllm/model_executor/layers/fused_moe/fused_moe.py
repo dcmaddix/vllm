@@ -1854,7 +1854,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
             B_bias=self.w1_bias,
         )
-
+        print(f"=== CALLING self.activation in TritonExperts.apply, self={type(self).__name__} ===")
         self.activation(activation, intermediate_cache2,
                         intermediate_cache1.view(-1, N))
 

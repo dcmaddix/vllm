@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
-from typing import Optional
+from typing import Optional, Callable
 
 import torch
 from typing_extensions import override
@@ -173,16 +173,41 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
+    # LoRA activation injection (mirroring act_decorator logic)
+    if _MARLIN_LORA_LAYER_REF is not None:
+        layer = _MARLIN_LORA_LAYER_REF
+        if hasattr(layer, '_lora') and 'marlin_activation_context' in layer._lora:
+            ctx = layer._lora['marlin_activation_context']
+            punica_wrapper = layer.punica_wrapper
+            
+            # Apply LoRA to intermediate_cache1 (2*N wide, before activation)
+            # This matches what act_decorator does: args[2] is the 2N input
+            # The punica wrapper will add LoRA delta to intermediate_cache1
+            punica_wrapper.add_lora_fused_moe(
+                intermediate_cache1.view(-1, topk, intermediate_cache1.shape[-1]),
+                hidden_states,
+                ctx["w13_lora_a_stacked"],
+                ctx["w13_lora_b_stacked"],
+                ctx["topk_weights"],
+                ctx["sorted_token_ids_lora"],
+                ctx["expert_ids_lora"],
+                ctx["num_tokens_post_padded_lora"],
+                ctx["max_lora_rank"],
+                topk,
+                ctx["config"],
+            )
+            print("[Marlin] LoRA activation injection completed")
+
+    # Standard activation (after LoRA if applied)
     if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
     elif activation == "swigluoai":
-        # alpha = 1.702, limit = 7.0
         torch.ops._C.swigluoai_and_mul(intermediate_cache2,
                                        intermediate_cache1.view(-1, 2 * N))
     else:
-        raise ValueError(f"Unsupported activation: {activation}. "
-                         "Only silu and swigluoai activations are supported.")
+        raise ValueError(
+            f"Unsupported activation: {activation}. Only silu and swigluoai activations are supported.")
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -256,11 +281,16 @@ direct_register_custom_op(
 )
 
 
+# Global reference for LoRA activation injection in Marlin path
+# Set by LoRA layer's forward decorator; accessed during activation stage
+_MARLIN_LORA_LAYER_REF = None
+
+
 class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        # assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
     @override
@@ -352,8 +382,9 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert self.w1_scale is not None # FIXME: Pass scale
+        assert self.w2_scale is not None # FIXME: Pass scale
+        
         return fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,

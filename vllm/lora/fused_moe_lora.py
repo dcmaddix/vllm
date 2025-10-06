@@ -175,6 +175,8 @@ def invoke_fused_moe_lora_kernel(
         config (_type_): _description_
         intermediate_cache1 (torch.Tensor): _description_
     """
+
+    print("[debug] fused_moe_lora is called!!!")
     assert len(lora_a_stacked) == len(lora_b_stacked)
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)

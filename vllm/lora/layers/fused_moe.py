@@ -68,6 +68,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def fwd_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
+                print("=== WRAPPER fwd CALLED ===")
                 # print("WRAPPER fwd")
                 self.base_layer._lora["hidden_states"] = kwargs[
                     "hidden_states"]
@@ -78,7 +79,84 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer._lora["expert_map"] = kwargs["expert_map"]
                 self.base_layer._lora["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"]
+                
+                # Prepare LoRA context for Marlin activation hook
+                # This mirrors what act_decorator does for Triton
+                hidden_states = kwargs["hidden_states"]
+                topk_weights = kwargs["topk_weights"]
+                curr_topk_ids = kwargs["topk_ids"]
+                global_num_experts = kwargs["global_num_experts"]
+                expert_map = kwargs["expert_map"]
+                
+                (token_lora_mapping, _, _, _, _, _) = layer.punica_wrapper.token_mapping_meta.meta_args(
+                    hidden_states.size(0))
+                config_dtype = get_config_dtype_str(
+                    use_fp8_w8a8=False,
+                    use_int8_w8a16=False,
+                    use_int4_w4a16=False,
+                    use_mxfp4_w4a4=False,
+                    dtype=hidden_states.dtype
+                )
+                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+                num_tokens = hidden_states.size(0)
+                M = min(num_tokens, CHUNK_SIZE)
+                
+                get_config_func = functools.partial(
+                    try_get_optimal_moe_config,
+                    layer.w13_weight.size(),
+                    layer.w2_weight.size(),
+                    top_k,
+                    config_dtype,
+                    block_shape=layer.quant_method.moe_quant_config.block_shape,
+                )
+                config = get_config_func(M)
+                
+                (sorted_token_ids_lora, expert_ids_lora, num_tokens_post_padded_lora) = (
+                    moe_lora_align_block_size(
+                        curr_topk_ids, token_lora_mapping, config['BLOCK_SIZE_M'],
+                        global_num_experts, curr_topk_ids.shape[-1], expert_map
+                    )
+                )
+                
+                w1_lora_a_stacked = layer.w1_lora_a_stacked
+                w1_lora_b_stacked = layer.w1_lora_b_stacked
+                w3_lora_a_stacked = layer.w3_lora_a_stacked
+                w3_lora_b_stacked = layer.w3_lora_b_stacked
+                
+                max_lora_rank = w1_lora_a_stacked.shape[-2]
+                w13_lora_a_stacked = [w1_lora_a_stacked, w3_lora_a_stacked]
+                w13_lora_b_stacked = [w1_lora_b_stacked, w3_lora_b_stacked]
+                expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
+                sorted_token_ids_lora = sorted_token_ids_lora.view(curr_topk_ids.shape[-1], -1)
+                
+                # Store context for Marlin activation hook
+                self.base_layer._lora["marlin_activation_context"] = {
+                    "w13_lora_a_stacked": w13_lora_a_stacked,
+                    "w13_lora_b_stacked": w13_lora_b_stacked,
+                    "topk_weights": topk_weights,
+                    "sorted_token_ids_lora": sorted_token_ids_lora,
+                    "expert_ids_lora": expert_ids_lora,
+                    "num_tokens_post_padded_lora": num_tokens_post_padded_lora,
+                    "max_lora_rank": max_lora_rank,
+                    "config": config,
+                }
+                
+                # Set global reference for Marlin kernel
+                try:
+                    from vllm.model_executor.layers.fused_moe import fused_marlin_moe
+                    fused_marlin_moe._MARLIN_LORA_LAYER_REF = layer
+                except ImportError:
+                    pass
+                
                 result = func(*args, **kwargs)
+                
+                # Clear global reference
+                try:
+                    from vllm.model_executor.layers.fused_moe import fused_marlin_moe
+                    fused_marlin_moe._MARLIN_LORA_LAYER_REF = None
+                except ImportError:
+                    pass
+                
                 return result
 
             return wrapper
@@ -86,7 +164,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def act_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
-                print("WRAPPER act")
+                print("=== WRAPPER act CALLED ===")
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]
@@ -164,7 +242,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def moe_sum_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
-
+                print("=== WRAPPER moe_sum CALLED ===")
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]

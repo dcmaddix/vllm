@@ -414,7 +414,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @property
     def per_out_ch_quant(self) -> bool:
-        return self.quant_config.per_out_ch_quant 
+        return self.quant_config.per_out_ch_quant
 
     @property
     def a1_scale(self) -> Optional[torch.Tensor]:
@@ -454,11 +454,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @property
     def g1_alphas(self) -> Optional[torch.Tensor]:
-        return self.quant_config.g1_alphas if hasattr(self.quant_config, "g1_alphas") else None
+        return self.quant_config.g1_alphas
 
     @property
     def g2_alphas(self) -> Optional[torch.Tensor]:
-        return self.quant_config.g2_alphas if hasattr(self.quant_config, "g2_alphas") else None
+        return self.quant_config.g2_alphas
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod

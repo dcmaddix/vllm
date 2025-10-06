@@ -423,9 +423,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def a2_scale(self) -> Optional[torch.Tensor]:
         return self.quant_config.a2_scale
+
     @property
     def a1_gscale(self) -> Optional[torch.Tensor]:
         return self.quant_config.a1_gscale
+
     @property
     def a2_gscale(self) -> Optional[torch.Tensor]:
         return self.quant_config.a2_gscale
@@ -433,6 +435,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def w1_scale(self) -> Optional[torch.Tensor]:
         return self.quant_config.w1_scale
+
     @property
     def w2_scale(self) -> Optional[torch.Tensor]:
         return self.quant_config.w2_scale
@@ -444,6 +447,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def w2_zp(self) -> Optional[torch.Tensor]:
         return self.quant_config.w2_zp
+
     @property
     def w1_bias(self) -> Optional[torch.Tensor]:
         return self.quant_config.w1_bias

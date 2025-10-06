@@ -1901,6 +1901,6 @@ def modular_triton_fused_moe(
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(quant_config) if not quant_config.use_mxfp4_w4a16 \
-            else MarlinExperts(quant_config), # link to marlin here!
+            else MarlinExperts(quant_config),
         shared_experts,
     )

@@ -69,7 +69,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             def wrapper(*args, **kwargs):
                 print("=== WRAPPER fwd CALLED ===")
-                # print("WRAPPER fwd")
                 self.base_layer._lora["hidden_states"] = kwargs[
                     "hidden_states"]
                 self.base_layer._lora["topk_ids"] = kwargs["topk_ids"]
@@ -198,7 +197,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                  num_tokens_post_padded_lora) = (moe_lora_align_block_size(
                      curr_topk_ids, token_lora_mapping, config['BLOCK_SIZE_M'],
                      global_num_experts, curr_topk_ids.shape[-1], expert_map))
-                print("sorted_token_ids_lora")
 
                 layer._lora["sorted_token_ids_lora"] = sorted_token_ids_lora
                 layer._lora["expert_ids_lora"] = expert_ids_lora
@@ -342,7 +340,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         m_fused_moe_fn.forward = fwd_decorator(base_layer,
                                                m_fused_moe_fn.forward)
-        print(m_fused_moe_fn.fused_experts.activation, m_fused_moe_fn.fused_experts)
         fused_experts.activation = act_decorator(base_layer,
                                                  fused_experts.activation)
         fused_experts.moe_sum = moe_sum_decorator(base_layer,

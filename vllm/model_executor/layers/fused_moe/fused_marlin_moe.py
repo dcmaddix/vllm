@@ -434,7 +434,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
-        # assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
     @override
@@ -526,8 +526,8 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert self.w1_scale is not None  # FIXME: Pass scale
-        assert self.w2_scale is not None  # FIXME: Pass scale
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
         
         # Use unreduced version to get (M, topk, K) tensor
         unreduced = fused_marlin_moe_unreduced(
@@ -541,7 +541,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_type_id=scalar_types.float4_e2m1f.id,
+            quant_type_id=scalar_types.float4_e2m1f.id, # works only for w4a16
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
